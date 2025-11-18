@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
@@ -15,12 +15,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Root endpoint (ChatGPT MCP에서 필수)
-@app.get("/")
-async def root():
-    return {"status": "MCP server running"}
+# ---------------------------------------------------------
+# 📌 MCP Creator가 가장 먼저 호출하는 health check
+# ---------------------------------------------------------
 
-# MCP metadata (.well-known)
+@app.get("/")
+async def root_get():
+    return {"status": "ok"}
+
+@app.head("/")
+async def root_head():
+    # HEAD 요청은 body 없이 200만 주면 충분함
+    return JSONResponse(content=None, status_code=200)
+
+
+# ---------------------------------------------------------
+# 📌 MCP Metadata (필수)
+# ---------------------------------------------------------
+
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
     return {
@@ -30,7 +42,16 @@ async def mcp_metadata():
         "tools_url": "https://ashen-mcp-server.onrender.com/tools"
     }
 
-# SSE event stream
+
+@app.head("/.well-known/mcp.json")
+async def mcp_metadata_head():
+    return JSONResponse(content=None, status_code=200)
+
+
+# ---------------------------------------------------------
+# 📌 SSE (Server Sent Events) – MCP Creator 필수 통신 방식
+# ---------------------------------------------------------
+
 async def sse_stream():
     while True:
         yield f"data: {json.dumps({'status': 'alive'})}\n\n"
@@ -40,7 +61,11 @@ async def sse_stream():
 async def sse_endpoint():
     return StreamingResponse(sse_stream(), media_type="text/event-stream")
 
-# MCP required endpoint: GET /tools
+
+# ---------------------------------------------------------
+# 📌 Tools – MCP Tool Registry
+# ---------------------------------------------------------
+
 @app.get("/tools")
 async def list_tools():
     return {
@@ -59,7 +84,7 @@ async def list_tools():
         ]
     }
 
-# MCP required endpoint: POST /tools/{tool_name}
+
 @app.post("/tools/ping")
 async def ping_tool(request: Request):
     body = await request.json()
