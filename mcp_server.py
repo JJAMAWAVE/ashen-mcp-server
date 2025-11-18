@@ -1,13 +1,15 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
-import datetime
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# CORS 설정
+# JSON-RPC over SSE용 큐
+client_queue = asyncio.Queue()
+
+# CORS 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,113 +18,107 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 서버 콘솔 로그 함수
-def log(msg: str):
-    print(f"[{datetime.datetime.now().isoformat()}] {msg}", flush=True)
-
-
-# ===============================
-# 1) ROOT HANDLER (404 방지)
-# ===============================
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    return """
-    <html>
-        <body>
-            <h2>ashen-mcp-server is running</h2>
-            <p>Use the following endpoints:</p>
-            <ul>
-                <li>/.well-known/mcp.json</li>
-                <li>/sse</li>
-                <li>/tools</li>
-            </ul>
-        </body>
-    </html>
-    """
-
-
-# ===============================
-# 2) MCP METADATA
-# ===============================
+# MCP metadata
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
-    log("MCP metadata requested")
     return {
-        "name": "ashen-mcp-server",
+        "name": "ashen-mcp",
         "version": "1.0.0",
+        "protocolVersion": "2025-06-18",
         "sse_url": "https://ashen-mcp-server.onrender.com/sse",
-        "tools_url": "https://ashen-mcp-server.onrender.com/tools"
+        "jsonrpc": "2.0",
     }
 
 
-# ===============================
-# 3) SSE STREAM
-# ===============================
-async def sse_stream(request: Request):
-    client_ip = request.client.host
-    agent = request.headers.get("user-agent", "")
+# ======================================================================
+# SSE 스트림 (ChatGPT가 이 스트림에서 JSON-RPC 요청을 보냄)
+# ======================================================================
+async def sse_event_stream():
+    # 첫 연결 이벤트 알림
+    yield "data: {}\n\n".format(json.dumps({"event": "connected"}))
 
-    log(f"[SSE] Client connected: {client_ip} | UA: {agent}")
-
-    # ChatGPT MCP 접속인지 자동 감지
-    if "ChatGPT" in agent or "Mozilla" not in agent:
-        log("[SSE] Suspected ChatGPT MCP client detected")
-
-    # 첫 메시지: ChatGPT 요구사항 충족
-    yield "event: message\ndata: {\"status\":\"connected\"}\n\n"
-
-    # heartbeat loop
-    try:
-        while True:
-            await asyncio.sleep(3)
-
-            if await request.is_disconnected():
-                log(f"[SSE] Client disconnected: {client_ip}")
-                break
-
-            heartbeat_payload = {"type": "heartbeat", "msg": "alive"}
-            yield f"event: message\ndata: {json.dumps(heartbeat_payload)}\n\n"
-
-            log(f"[SSE] → heartbeat sent to {client_ip}")
-
-    except Exception as e:
-        log(f"[SSE] ERROR: {e}")
+    while True:
+        req = await client_queue.get()
+        yield f"data: {json.dumps(req)}\n\n"
 
 
 @app.get("/sse")
-async def sse_endpoint(request: Request):
+async def sse_endpoint():
     return StreamingResponse(
-        sse_stream(request),
+        sse_event_stream(),
         media_type="text/event-stream"
     )
 
 
-# ===============================
-# 4) TOOLS
-# ===============================
-@app.get("/tools")
-async def list_tools():
-    log("Tool list requested")
-    return {
-        "tools": [
-            {
-                "name": "ping",
-                "description": "Returns a pong message",
-                "input_schema": {
-                    "type": "object",
-                    "properties": { "message": { "type": "string" } },
-                    "required": ["message"]
-                }
-            }
-        ]
-    }
-
-
-@app.post("/tools/ping")
-async def ping_tool(request: Request):
+# ======================================================================
+# ChatGPT가 JSON-RPC 요청을 보내는 엔드포인트 (POST /rpc)
+# ======================================================================
+@app.post("/rpc")
+async def rpc_endpoint(request: Request):
     body = await request.json()
-    message = body.get("message", "empty")
 
-    log(f"PING tool called: {message}")
+    #
+    # 구조 예시:
+    # { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }
+    #
 
-    return {"response": f"Pong: {message}"}
+    method = body.get("method")
+    request_id = body.get("id")
+
+    # ========== initialize ==========
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "ashen-mcp", "version": "1.0.0"},
+            "serverInfo": {"name": "ashen-mcp", "version": "1.0.0"},
+            "tools": [{
+                "name": "hello",
+                "description": "Return a greeting",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"]
+                }
+            }]
+        }
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    # ========== tools/list ==========
+    if method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "hello",
+                "description": "Return a greeting",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }
+            }]
+        }
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    # ========== tools/call ==========
+    if method == "tools/call":
+        params = body.get("params", {})
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        
+        if tool_name == "hello":
+            name = arguments.get("name", "unknown")
+            greeting = f"Hello, {name}!"
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": greeting}
+            }
+
+    # 알 수 없는 method
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": -32601, "message": "Method not found"}
+    }
