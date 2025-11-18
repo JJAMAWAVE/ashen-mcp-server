@@ -1,14 +1,20 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
+from typing import Any, Dict, Optional
 
 app = FastAPI()
 
-# -------------------------------------------------
-# CORS 설정
-# -------------------------------------------------
+# ===== SETTINGS =====
+SERVER_NAME = "ashen-mcp-server"
+SERVER_VERSION = "2.0.0"
+PROTOCOL_VERSION = "2025-06-18"         # 최신 스펙 버전
+BASE_URL = "https://ashen-mcp-server.onrender.com"
+
+
+# ===== CORS ALLOW =====
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,65 +23,179 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------------------------
-# MCP metadata
-# -------------------------------------------------
+
+# ------------------------------------------------------
+# 0. ROOT ENDPOINT — ChatGPT가 MCP URL 테스트 시 필수
+# ------------------------------------------------------
+@app.get("/", status_code=200)
+async def root():
+    return {
+        "status": "ok",
+        "name": SERVER_NAME,
+        "version": SERVER_VERSION
+    }
+
+
+@app.get("/health", status_code=200)
+async def health():
+    return {"status": "healthy"}
+
+
+# ------------------------------------------------------
+# 1. MCP METADATA (.well-known/mcp.json)
+# ------------------------------------------------------
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
-    return {
-        "name": "ashen-mcp-server",
-        "version": "1.0.0",
-        "sse_url": "https://ashen-mcp-server.onrender.com/sse",
-        "tools_url": "https://ashen-mcp-server.onrender.com/tools"
+    content = {
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {}
+        },
+        "serverInfo": {
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION
+        },
+        "transport": "sse",
+        "sse": {
+            "url": f"{BASE_URL}/sse"
+        },
+        # 향후 Streamable HTTP 사용 가능 (선택)
+        "streamableHttp": {
+            "url": f"{BASE_URL}/mcp"
+        }
     }
 
-# -------------------------------------------------
-# SSE 스트림
-# ChatGPT MCP에서 요구하는 구조에 완벽히 맞춤
-# -------------------------------------------------
+    response = JSONResponse(content)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.head("/.well-known/mcp.json")
+async def mcp_metadata_head():
+    return Response(status_code=200)
+
+
+# ------------------------------------------------------
+# 2. SSE STREAM — ChatGPT 지속 연결
+# ------------------------------------------------------
+async def sse_stream():
+    # 초기 연결 이벤트
+    yield f"data: {json.dumps({'event': 'connected'})}\n\n"
+    await asyncio.sleep(0.2)
+
+    # keep-alive
+    while True:
+        yield f"data: {json.dumps({'event': 'alive'})}\n\n"
+        await asyncio.sleep(10)
+
+
 @app.get("/sse")
 async def sse_endpoint():
+    headers = {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Connection": "keep-alive",
+        "Pragma": "no-cache"
+    }
+    return StreamingResponse(sse_stream(), headers=headers)
 
-    async def event_generator():
-        # 최초 연결 알림
-        yield f"data: {json.dumps({'event': 'connected'})}\n\n"
-        await asyncio.sleep(0.1)
 
-        # 무한 heartbeat
-        while True:
-            yield f"data: {json.dumps({'event': 'alive'})}\n\n"
-            await asyncio.sleep(5)
+# ------------------------------------------------------
+# 3. JSON-RPC HANDLER (CORE MCP LOGIC)
+# ------------------------------------------------------
+async def handle_rpc(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    method = body.get("method")
+    params = body.get("params", {})
+    rpc_id = body.get("id")
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    is_notification = rpc_id is None
 
-# -------------------------------------------------
-# MCP: GET /tools
-# -------------------------------------------------
-@app.get("/tools")
-async def list_tools():
-    return {
-        "tools": [
-            {
-                "name": "ping",
-                "description": "Returns a pong message",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "message": {"type": "string"}
-                    },
-                    "required": ["message"]
+    def ok(result: Any) -> Optional[Dict[str, Any]]:
+        if is_notification:
+            return None
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": result
+        }
+
+    def err(code: int, message: str):
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": {"code": code, "message": message}
+        }
+
+    # INITIALIZE
+    if method == "initialize":
+        return ok({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
+        })
+
+    # TOOL LIST
+    if method == "tools/list":
+        return ok({
+            "tools": [
+                {
+                    "name": "hello",
+                    "description": "Return a greeting message.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"]
+                    }
                 }
-            }
-        ]
-    }
+            ]
+        })
 
-# -------------------------------------------------
-# MCP: POST /tools/ping
-# -------------------------------------------------
-@app.post("/tools/ping")
-async def ping_tool(request: Request):
+    # TOOL CALL
+    if method == "tools/call":
+        tool_name = params.get("name")
+        args = params.get("arguments", {})
+
+        if tool_name == "hello":
+            name = args.get("name", "friend")
+            return ok({
+                "content": [{"type": "text", "text": f"Hello, {name}!"}],
+                "isError": False
+            })
+
+        return err(-32601, f"Unknown tool: {tool_name}")
+
+    # UNKNOWN METHOD
+    if is_notification:
+        return None
+
+    return err(-32601, f"Unknown method: {method}")
+
+
+@app.post("/messages")
+async def messages_endpoint(request: Request):
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": "Parse error"}
+        }, status_code=400)
+
+    response_payload = await handle_rpc(body)
+
+    if response_payload is None:
+        return Response(status_code=204)
+
+    return JSONResponse(response_payload)
+
+
+# ------------------------------------------------------
+# 4. STREAMABLE HTTP (Optional)
+# ------------------------------------------------------
+@app.post("/mcp")
+async def streamable_mcp(request: Request):
     body = await request.json()
-    msg = body.get("message", "empty")
-    return {
-        "response": f"Pong: {msg}"
-    }
+    response = await handle_rpc(body)
+    return JSONResponse(response)
