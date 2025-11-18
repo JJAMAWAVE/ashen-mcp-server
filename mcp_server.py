@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
@@ -15,8 +15,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# MCP metadata (.well-known)
 @app.get("/.well-known/mcp.json")
-async def mcp_wellknown():
+async def mcp_metadata():
     return {
         "name": "ashen-mcp-server",
         "version": "1.0.0",
@@ -24,22 +25,25 @@ async def mcp_wellknown():
         "tools_url": "https://ashen-mcp-server.onrender.com/tools"
     }
 
-async def event_stream():
+# SSE event stream
+async def sse_stream():
     while True:
         yield f"data: {json.dumps({'status': 'alive'})}\n\n"
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
 
 @app.get("/sse")
 async def sse_endpoint():
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(sse_stream(), media_type="text/event-stream")
 
+
+# MCP required endpoint: GET /tools
 @app.get("/tools")
 async def list_tools():
     return {
         "tools": [
             {
                 "name": "ping",
-                "description": "테스트용 ping 툴",
+                "description": "Returns a pong message",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -51,8 +55,9 @@ async def list_tools():
         ]
     }
 
+# MCP required endpoint: POST /tools/{tool_name}
 @app.post("/tools/ping")
-async def run_ping(request: Request):
+async def ping_tool(request: Request):
     body = await request.json()
-    message = body.get("message", "")
-    return {"response": f"Pong: {message}"}
+    msg = body.get("message", "empty")
+    return {"response": f"Pong: {msg}"}
