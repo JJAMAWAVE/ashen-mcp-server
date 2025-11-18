@@ -6,7 +6,6 @@ import asyncio
 
 SERVER_NAME = "ashen-mcp-server"
 SERVER_VERSION = "2.0.0"
-BASE_URL = "https://ashen-mcp-server.onrender.com"
 PROTOCOL_VERSION = "2025-06-18"
 
 app = FastAPI()
@@ -33,25 +32,21 @@ async def root_head():
 
 
 # ============================
-# 2) MCP Metadata
+# 2) MCP Metadata  (SSE 전용)
 # ============================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {
-            "tools": {}
-        },
+        "capabilities": {"tools": {}},
         "serverInfo": {
             "name": SERVER_NAME,
             "version": SERVER_VERSION
         },
         "transport": "sse",
         "sse": {
-            "url": f"{BASE_URL}/sse"
-        },
-        "streamableHttp": {
-            "url": f"{BASE_URL}/mcp"
+            # ChatGPT가 자동으로 full URL로 변환함
+            "url": "/sse"
         }
     }
 
@@ -69,7 +64,7 @@ async def handle_rpc(body: dict) -> dict:
     method = body.get("method")
     params = body.get("params", {})
 
-    # 1. initialize
+    # initialize
     if method == "initialize":
         return {
             "jsonrpc": "2.0",
@@ -84,7 +79,7 @@ async def handle_rpc(body: dict) -> dict:
             }
         }
 
-    # 2. tools/list
+    # tools/list
     if method == "tools/list":
         return {
             "jsonrpc": "2.0",
@@ -116,20 +111,17 @@ async def handle_rpc(body: dict) -> dict:
             }
         }
 
-    # 3. tools/call
+    # tools/call
     if method == "tools/call":
         tool = params.get("name")
         args = params.get("arguments", {})
 
         if tool == "hello":
-            name = args.get("name", "friend")
-            text = f"Hello, {name}!"
-
+            text = f"Hello, {args.get('name', 'friend')}!"
         elif tool == "add":
             a = args.get("a", 0)
             b = args.get("b", 0)
             text = f"{a} + {b} = {a+b}"
-
         else:
             return {
                 "jsonrpc": "2.0",
@@ -149,39 +141,16 @@ async def handle_rpc(body: dict) -> dict:
             }
         }
 
-    # 알 수 없는 메서드
+    # unknown method
     return {
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "error": {
-            "code": -32601,
-            "message": f"Unknown method: {method}"
-        }
+        "error": {"code": -32601, "message": f"Unknown method: {method}"}
     }
 
 
 # ============================
-# 4) Streamable HTTP (선택사항)
-# ============================
-@app.post("/mcp")
-async def rpc_http(request: Request):
-    try:
-        body = await request.json()
-    except:
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {"code": -32700, "message": "Parse error"}
-        }, status_code=400)
-
-    result = await handle_rpc(body)
-    response = JSONResponse(result)
-    response.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
-    return response
-
-
-# ============================
-# 5) SSE
+# 4) SSE (필수)
 # ============================
 async def sse_stream():
     yield f"data: {json.dumps({'event': 'connected'})}\n\n"
