@@ -1,18 +1,18 @@
-# ================================
-#  MCP SERVER (FINAL STABLE EDITION)
-#  플러그인 자동 로더 + JSON-RPC + SSE
-#  대장님은 plugins 폴더만 수정하면 됩니다
-# ================================
+# ============================================
+# ashen-mcp-server — Full Stable Version
+# ============================================
 
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import importlib
-import pkgutil
 import json
+import asyncio
+import subprocess
 import os
 
+# --------------------------------------------
+# SERVER CONFIG
+# --------------------------------------------
 SERVER_NAME = "ashen-mcp-server"
 SERVER_VERSION = "2.0.0"
 PROTOCOL_VERSION = "2025-06-18"
@@ -20,9 +20,9 @@ BASE_URL = "https://ashen-mcp-server.onrender.com"
 
 app = FastAPI()
 
-# ==================================
-# CORS
-# ==================================
+# --------------------------------------------
+# CORS (Required for ChatGPT)
+# --------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,9 +31,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================================
-# 1) ROOT (GET / HEAD)
-# ==================================
+# ============================================
+# 0) ROOT (GET + HEAD)
+# ============================================
 @app.get("/", status_code=200)
 async def root():
     return {"status": "ok", "message": "MCP server running"}
@@ -43,136 +43,218 @@ async def root_head():
     return ""
 
 
-# ==================================
-# 2) 플러그인 자동 로딩 시스템
-# ==================================
-
-PLUGIN_FOLDER = "plugins"
-loaded_plugins = {}   # name → module
-tool_definitions = {} # name → TOOL dict
-
-def load_plugins():
-    """
-    plugins 폴더 안의 모든 *.py 파일을 자동 로딩한다.
-    TOOL 와 run() 함수가 있으면 자동 등록
-    """
-    global loaded_plugins, tool_definitions
-
-    if not os.path.isdir(PLUGIN_FOLDER):
-        print("[WARN] plugins 폴더 없음, 생성 중…")
-        os.makedirs(PLUGIN_FOLDER, exist_ok=True)
-
-    print("=== MCP Plugin Loader ===")
-    for finder, name, ispkg in pkgutil.iter_modules([PLUGIN_FOLDER]):
-        module_path = f"{PLUGIN_FOLDER}.{name}"
-        print(f" - Loaded plugin: {module_path}")
-
-        module = importlib.import_module(module_path)
-
-        if hasattr(module, "TOOL") and hasattr(module, "run"):
-            tool_name = module.TOOL.get("name")
-            tool_definitions[tool_name] = module.TOOL
-            loaded_plugins[tool_name] = module
-
-        else:
-            print(f"   [WARN] {name}.py: TOOL or run() 없음 → 스킵")
-
-    print("=== Plugin Loading Complete ===")
-
-
-# 서버 시작 시 플러그인 자동 로딩
-load_plugins()
-
-
-# ==================================
-# 3) MCP Metadata
-# ==================================
+# ============================================
+# 1) MCP METADATA (.well-known/mcp.json)
+# ============================================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
+
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
-            "tools": tool_definitions
+            "tools": {
+                # Tool A: analyze text (Ollama)
+                "analyze_text": {
+                    "name": "analyze_text",
+                    "description": "Analyze or summarize text using offline Ollama models.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "mode": {
+                                "type": "string",
+                                "enum": ["summary", "analysis", "keywords"],
+                                "default": "summary",
+                            },
+                        },
+                        "required": ["text"],
+                    }
+                },
+
+                # Tool B: call_ollama (prompt 모델 호출)
+                "call_ollama": {
+                    "name": "call_ollama",
+                    "description": "Call any local Ollama model with a prompt.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "model": {"type": "string"},
+                            "prompt": {"type": "string"},
+                        },
+                        "required": ["model", "prompt"],
+                    }
+                },
+
+                # Tool C: summarize file
+                "summarize_file": {
+                    "name": "summarize_file",
+                    "description": "Read a local file and summarize its content using Ollama.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"],
+                    }
+                },
+            }
         },
-        "serverInfo": {
-            "name": SERVER_NAME,
-            "version": SERVER_VERSION
-        },
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         "transport": "sse",
-        "sse": {
-            "url": "/sse"
-        },
-        "streamableHttp": {
-            "url": "/mcp"
-        }
+        "sse": {"url": "/sse"},
+        "streamableHttp": {"url": "/mcp"},
     }
 
     resp = JSONResponse(metadata)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    resp.headers["Pragma"] = "no-cache"
     return resp
 
 
-# ==================================
-# 4) JSON-RPC 메서드 처리기
-# ==================================
-async def dispatch_rpc(body: dict):
+# ============================================
+# Ollama Helper Function
+# ============================================
+def call_ollama_raw(model: str, prompt: str) -> str:
+    """
+    Ollama 모델을 직접 호출 (subprocess)
+    """
+    try:
+        result = subprocess.run(
+            ["ollama", "run", model],
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            return f"[ERROR] Ollama error: {result.stderr.decode('utf-8', errors='ignore')}"
+
+        return result.stdout.decode("utf-8", errors="ignore")
+
+    except Exception as e:
+        return f"[ERROR] Ollama execution failed: {str(e)}"
+
+
+# ============================================
+# 2) JSON-RPC HANDLER
+# ============================================
+async def handle_rpc(body: dict):
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params", {})
 
-    # initialize
-    if method == "initialize":
+    # ----------------------------------------
+    # A) analyze_text
+    # ----------------------------------------
+    if method == "analyze_text":
+        text = params.get("text", "")
+        mode = params.get("mode", "summary")
+
+        if not text.strip():
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32602, "message": "text is required"}
+            }
+
+        if mode == "summary":
+            prompt = f"Summarize the following text:\n\n{text}"
+        elif mode == "analysis":
+            prompt = f"Analyze the following text deeply:\n\n{text}"
+        elif mode == "keywords":
+            prompt = f"Extract important keywords from the following text:\n\n{text}"
+        else:
+            prompt = text
+
+        result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
+
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {
-                    "tools": tool_definitions
-                },
-                "serverInfo": {
-                    "name": SERVER_NAME,
-                    "version": SERVER_VERSION
-                }
+                "content": [{"type": "text", "text": result}],
+                "isError": result.startswith("[ERROR]")
             }
         }
 
-    # plugin tool
-    if method in loaded_plugins:
-        try:
-            result = await loaded_plugins[method].run(params)
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "result": result
-            }
-        except Exception as e:
+    # ----------------------------------------
+    # B) call_ollama
+    # ----------------------------------------
+    if method == "call_ollama":
+        model = params.get("model")
+        prompt = params.get("prompt")
+
+        if not model or not prompt:
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "error": {
-                    "code": -32000,
-                    "message": f"Tool execution error: {e}"
+                    "code": -32602,
+                    "message": "model and prompt required"
                 }
             }
 
-    # unknown method
+        result = call_ollama_raw(model, prompt)
+
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "content": [{"type": "text", "text": result}],
+                "isError": result.startswith("[ERROR]")
+            }
+        }
+
+    # ----------------------------------------
+    # C) summarize_file
+    # ----------------------------------------
+    if method == "summarize_file":
+        path = params.get("path")
+
+        if not path or not os.path.exists(path):
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32602, "message": "File not found"}
+            }
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except:
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32603, "message": "File read error"}
+            }
+
+        prompt = f"Summarize this file content:\n\n{content}"
+        result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
+
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "content": [{"type": "text", "text": result}],
+                "isError": result.startswith("[ERROR]")
+            }
+        }
+
+    # ----------------------------------------
+    # D) Unknown Method
+    # ----------------------------------------
     return {
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "error": {
-            "code": -32601,
-            "message": f"Unknown method: {method}"
-        }
+        "error": {"code": -32601, "message": f"Unknown method: {method}"}
     }
 
 
-# ==================================
-# 5) Streamable HTTP
-# ==================================
+# ============================================
+# 3) STREAMABLE HTTP /mcp
+# ============================================
 @app.post("/mcp")
-async def mcp_http(request: Request):
+async def rpc_http(request: Request):
     try:
         body = await request.json()
     except:
@@ -180,30 +262,30 @@ async def mcp_http(request: Request):
             "jsonrpc": "2.0",
             "id": None,
             "error": {"code": -32700, "message": "Parse error"}
-        }, status_code=400)
+        })
 
-    result = await dispatch_rpc(body)
+    result = await handle_rpc(body)
+    response = JSONResponse(result)
+    response.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+    return response
 
-    resp = JSONResponse(result)
-    resp.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
-    return resp
 
-
-# ==================================
-# 6) SSE Transport
-# ==================================
+# ============================================
+# 4) SSE (FIXED VERSION — instant flush)
+# ============================================
 async def sse_stream():
-    yield f"data: {json.dumps({'event': 'connected'})}\n\n"
+    # 첫 이벤트 즉시 전송
+    yield "event: connected\ndata: {}\n\n"
+
+    # heartbeat
     while True:
-        yield f"data: {json.dumps({'event': 'alive'})}\n\n"
+        yield "event: alive\ndata: {}\n\n"
         await asyncio.sleep(5)
+
 
 @app.get("/sse")
 async def sse_endpoint():
-    headers = {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-    }
-    return StreamingResponse(sse_stream(), headers=headers)
+    return StreamingResponse(
+        sse_stream(),
+        media_type="text/event-stream"
+    )
