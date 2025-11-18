@@ -1,29 +1,28 @@
-##############################################
-# MCP Server - Stable Plugin Version
-##############################################
+# ================================
+#  MCP SERVER (FINAL STABLE EDITION)
+#  플러그인 자동 로더 + JSON-RPC + SSE
+#  대장님은 plugins 폴더만 수정하면 됩니다
+# ================================
 
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-
 import asyncio
-import json
-import pkgutil
 import importlib
-import plugins    # plugins 폴더 자동 로딩
-##############################################
+import pkgutil
+import json
+import os
 
 SERVER_NAME = "ashen-mcp-server"
 SERVER_VERSION = "2.0.0"
-BASE_URL = "https://ashen-mcp-server.onrender.com"
 PROTOCOL_VERSION = "2025-06-18"
+BASE_URL = "https://ashen-mcp-server.onrender.com"
 
-##############################################
-# FastAPI 초기화
-##############################################
 app = FastAPI()
 
-# CORS 설정
+# ==================================
+# CORS
+# ==================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,20 +31,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-##############################################
-# 플러그인 자동 로딩
-##############################################
-loaded_plugins = {}
-
-for loader, module_name, ispkg in pkgutil.iter_modules(plugins.__path__):
-    module = importlib.import_module(f"plugins.{module_name}")
-    if hasattr(module, "run") and hasattr(module, "spec"):
-        loaded_plugins[module_name] = module
-        print(f"[PLUGIN] Loaded: {module_name}")
-
-##############################################
-# 1) 루트 엔드포인트 (GET + HEAD)
-##############################################
+# ==================================
+# 1) ROOT (GET / HEAD)
+# ==================================
 @app.get("/", status_code=200)
 async def root():
     return {"status": "ok", "message": "MCP server running"}
@@ -55,15 +43,56 @@ async def root_head():
     return ""
 
 
-##############################################
-# 2) MCP Metadata
-##############################################
+# ==================================
+# 2) 플러그인 자동 로딩 시스템
+# ==================================
+
+PLUGIN_FOLDER = "plugins"
+loaded_plugins = {}   # name → module
+tool_definitions = {} # name → TOOL dict
+
+def load_plugins():
+    """
+    plugins 폴더 안의 모든 *.py 파일을 자동 로딩한다.
+    TOOL 와 run() 함수가 있으면 자동 등록
+    """
+    global loaded_plugins, tool_definitions
+
+    if not os.path.isdir(PLUGIN_FOLDER):
+        print("[WARN] plugins 폴더 없음, 생성 중…")
+        os.makedirs(PLUGIN_FOLDER, exist_ok=True)
+
+    print("=== MCP Plugin Loader ===")
+    for finder, name, ispkg in pkgutil.iter_modules([PLUGIN_FOLDER]):
+        module_path = f"{PLUGIN_FOLDER}.{name}"
+        print(f" - Loaded plugin: {module_path}")
+
+        module = importlib.import_module(module_path)
+
+        if hasattr(module, "TOOL") and hasattr(module, "run"):
+            tool_name = module.TOOL.get("name")
+            tool_definitions[tool_name] = module.TOOL
+            loaded_plugins[tool_name] = module
+
+        else:
+            print(f"   [WARN] {name}.py: TOOL or run() 없음 → 스킵")
+
+    print("=== Plugin Loading Complete ===")
+
+
+# 서버 시작 시 플러그인 자동 로딩
+load_plugins()
+
+
+# ==================================
+# 3) MCP Metadata
+# ==================================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
-            "tools": {}
+            "tools": tool_definitions
         },
         "serverInfo": {
             "name": SERVER_NAME,
@@ -84,24 +113,24 @@ async def mcp_metadata():
     return resp
 
 
-##############################################
-# JSON-RPC 처리기
-##############################################
-async def handle_rpc(body: dict) -> dict:
+# ==================================
+# 4) JSON-RPC 메서드 처리기
+# ==================================
+async def dispatch_rpc(body: dict):
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params", {})
 
-    ###################################
     # initialize
-    ###################################
     if method == "initialize":
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
+                "capabilities": {
+                    "tools": tool_definitions
+                },
                 "serverInfo": {
                     "name": SERVER_NAME,
                     "version": SERVER_VERSION
@@ -109,47 +138,26 @@ async def handle_rpc(body: dict) -> dict:
             }
         }
 
-    ###################################
-    # tools/list → 플러그인 자동 등록
-    ###################################
-    elif method == "tools/list":
-        tools = []
-        for name, module in loaded_plugins.items():
-            tools.append(module.spec())
-
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": {"tools": tools}
-        }
-
-    ###################################
-    # tools/call → 플러그인 실행
-    ###################################
-    elif method == "tools/call":
-        tool_name = params.get("name")
-        args = params.get("arguments", {})
-
-        if tool_name in loaded_plugins:
-            result_obj = loaded_plugins[tool_name].run(args)
+    # plugin tool
+    if method in loaded_plugins:
+        try:
+            result = await loaded_plugins[method].run(params)
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
-                "result": result_obj
+                "result": result
+            }
+        except Exception as e:
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {
+                    "code": -32000,
+                    "message": f"Tool execution error: {e}"
+                }
             }
 
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "error": {
-                "code": -32601,
-                "message": f"Unknown tool: {tool_name}"
-            }
-        }
-
-    ###################################
-    # 기타 알 수 없는 요청
-    ###################################
+    # unknown method
     return {
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -160,11 +168,11 @@ async def handle_rpc(body: dict) -> dict:
     }
 
 
-##############################################
-# 3) Streamable HTTP 엔드포인트
-##############################################
+# ==================================
+# 5) Streamable HTTP
+# ==================================
 @app.post("/mcp")
-async def rpc_http(request: Request):
+async def mcp_http(request: Request):
     try:
         body = await request.json()
     except:
@@ -174,16 +182,16 @@ async def rpc_http(request: Request):
             "error": {"code": -32700, "message": "Parse error"}
         }, status_code=400)
 
-    result = await handle_rpc(body)
+    result = await dispatch_rpc(body)
 
     resp = JSONResponse(result)
     resp.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
     return resp
 
 
-##############################################
-# 4) SSE 엔드포인트
-##############################################
+# ==================================
+# 6) SSE Transport
+# ==================================
 async def sse_stream():
     yield f"data: {json.dumps({'event': 'connected'})}\n\n"
     while True:
