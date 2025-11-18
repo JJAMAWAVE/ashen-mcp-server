@@ -1,16 +1,19 @@
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import json
 import asyncio
+import json
 
 SERVER_NAME = "ashen-mcp-server"
 SERVER_VERSION = "2.0.0"
+BASE_URL = "https://ashen-mcp-server.onrender.com"
 PROTOCOL_VERSION = "2025-06-18"
 
 app = FastAPI()
 
+# ============================
 # CORS 설정
+# ============================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,10 +23,10 @@ app.add_middleware(
 )
 
 # ============================
-# 1) 루트 (HEAD 포함)
+# 1) 루트 경로 (HEAD 포함)
 # ============================
 @app.get("/", status_code=200)
-async def root():
+async def root_get():
     return {"status": "ok", "message": "MCP server running"}
 
 @app.head("/", status_code=200)
@@ -32,21 +35,26 @@ async def root_head():
 
 
 # ============================
-# 2) MCP Metadata  (SSE 전용)
+# 2) MCP Metadata
 # ============================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {"tools": {}},
+        "capabilities": {
+            "tools": {}
+        },
         "serverInfo": {
             "name": SERVER_NAME,
             "version": SERVER_VERSION
         },
         "transport": "sse",
         "sse": {
-            # ChatGPT가 자동으로 full URL로 변환함
             "url": "/sse"
+        },
+        # StreamableHTTP는 선택 사항
+        "streamableHttp": {
+            "url": "/mcp"
         }
     }
 
@@ -57,7 +65,7 @@ async def mcp_metadata():
 
 
 # ============================
-# 3) JSON-RPC 처리기
+# 3) JSON-RPC 처리
 # ============================
 async def handle_rpc(body: dict) -> dict:
     rpc_id = body.get("id")
@@ -91,13 +99,15 @@ async def handle_rpc(body: dict) -> dict:
                         "description": "Returns a greeting",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {"name": {"type": "string"}},
+                            "properties": {
+                                "name": {"type": "string"}
+                            },
                             "required": ["name"]
                         }
                     },
                     {
                         "name": "add",
-                        "description": "Adds two numbers",
+                        "description": "Add two numbers",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -113,22 +123,25 @@ async def handle_rpc(body: dict) -> dict:
 
     # tools/call
     if method == "tools/call":
-        tool = params.get("name")
+        tool_name = params.get("name")
         args = params.get("arguments", {})
 
-        if tool == "hello":
-            text = f"Hello, {args.get('name', 'friend')}!"
-        elif tool == "add":
+        if tool_name == "hello":
+            name = args.get("name", "friend")
+            text = f"Hello, {name}!"
+
+        elif tool_name == "add":
             a = args.get("a", 0)
             b = args.get("b", 0)
             text = f"{a} + {b} = {a+b}"
+
         else:
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "error": {
                     "code": -32601,
-                    "message": f"Unknown tool: {tool}"
+                    "message": f"Unknown tool: {tool_name}"
                 }
             }
 
@@ -145,18 +158,41 @@ async def handle_rpc(body: dict) -> dict:
     return {
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "error": {"code": -32601, "message": f"Unknown method: {method}"}
+        "error": {
+            "code": -32601,
+            "message": f"Unknown method: {method}"
+        }
     }
 
 
 # ============================
-# 4) SSE (필수)
+# 4) Streamable HTTP 방식 (선택적)
+# ============================
+@app.post("/mcp")
+async def rpc_http(request: Request):
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": "Parse error"}
+        }, status_code=400)
+
+    response = JSONResponse(await handle_rpc(body))
+    response.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+    return response
+
+
+# ============================
+# 5) SSE Transport
 # ============================
 async def sse_stream():
     yield f"data: {json.dumps({'event': 'connected'})}\n\n"
     while True:
         yield f"data: {json.dumps({'event': 'alive'})}\n\n"
         await asyncio.sleep(5)
+
 
 @app.get("/sse")
 async def sse_endpoint():
@@ -167,3 +203,20 @@ async def sse_endpoint():
         "Pragma": "no-cache",
     }
     return StreamingResponse(sse_stream(), headers=headers)
+
+
+# ============================
+# 6) ★ 필수: /messages (SSE 전용 JSON-RPC 엔드포인트)
+# ============================
+@app.post("/messages")
+async def rpc_messages(request: Request):
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": "Parse error"}
+        }, status_code=400)
+
+    return JSONResponse(await handle_rpc(body))
