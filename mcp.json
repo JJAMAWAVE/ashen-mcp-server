@@ -1,0 +1,6 @@
+{
+  "name": "ashen-mcp-server",
+  "version": "1.0.0",
+  "sse_url": "https://ashen-mcp-server.onrender.com/sse",
+  "tools_url": "https://ashen-mcp-server.onrender.com/tools"
+}
