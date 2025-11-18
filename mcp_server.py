@@ -15,6 +15,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Root endpoint (ChatGPT MCP에서 필수)
+@app.get("/")
+async def root():
+    return {"status": "MCP server running"}
+
 # MCP metadata (.well-known)
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
@@ -34,7 +39,6 @@ async def sse_stream():
 @app.get("/sse")
 async def sse_endpoint():
     return StreamingResponse(sse_stream(), media_type="text/event-stream")
-
 
 # MCP required endpoint: GET /tools
 @app.get("/tools")
