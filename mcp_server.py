@@ -1,5 +1,5 @@
 # ============================================
-# ashen-mcp-server — Full Stable Version
+# ashen-mcp-server — Full Stable MCP Server
 # ============================================
 
 from fastapi import FastAPI, Request
@@ -11,7 +11,7 @@ import subprocess
 import os
 
 # --------------------------------------------
-# SERVER CONFIG
+# CONFIG
 # --------------------------------------------
 SERVER_NAME = "ashen-mcp-server"
 SERVER_VERSION = "2.0.0"
@@ -21,7 +21,7 @@ BASE_URL = "https://ashen-mcp-server.onrender.com"
 app = FastAPI()
 
 # --------------------------------------------
-# CORS (Required for ChatGPT)
+# CORS
 # --------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +32,7 @@ app.add_middleware(
 )
 
 # ============================================
-# 0) ROOT (GET + HEAD)
+# 0) ROOT
 # ============================================
 @app.get("/", status_code=200)
 async def root():
@@ -53,10 +53,9 @@ async def mcp_metadata():
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
             "tools": {
-                # Tool A: analyze text (Ollama)
                 "analyze_text": {
                     "name": "analyze_text",
-                    "description": "Analyze or summarize text using offline Ollama models.",
+                    "description": "Analyze/summarize text using Ollama.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -64,38 +63,34 @@ async def mcp_metadata():
                             "mode": {
                                 "type": "string",
                                 "enum": ["summary", "analysis", "keywords"],
-                                "default": "summary",
+                                "default": "summary"
                             },
                         },
                         "required": ["text"],
-                    }
+                    },
                 },
 
-                # Tool B: call_ollama (prompt 모델 호출)
                 "call_ollama": {
                     "name": "call_ollama",
-                    "description": "Call any local Ollama model with a prompt.",
+                    "description": "Call any Ollama model with a prompt.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "model": {"type": "string"},
-                            "prompt": {"type": "string"},
+                            "prompt": {"type": "string"}
                         },
                         "required": ["model", "prompt"],
-                    }
+                    },
                 },
 
-                # Tool C: summarize file
                 "summarize_file": {
                     "name": "summarize_file",
-                    "description": "Read a local file and summarize its content using Ollama.",
+                    "description": "Read file & summarize via Ollama.",
                     "inputSchema": {
                         "type": "object",
-                        "properties": {
-                            "path": {"type": "string"}
-                        },
+                        "properties": {"path": {"type": "string"}},
                         "required": ["path"],
-                    }
+                    },
                 },
             }
         },
@@ -111,26 +106,24 @@ async def mcp_metadata():
 
 
 # ============================================
-# Ollama Helper Function
+# OLLAMA HELPER
 # ============================================
 def call_ollama_raw(model: str, prompt: str) -> str:
-    """
-    Ollama 모델을 직접 호출 (subprocess)
-    """
     try:
         result = subprocess.run(
             ["ollama", "run", model],
             input=prompt.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=60
+            timeout=300
         )
 
         if result.returncode != 0:
             return f"[ERROR] Ollama error: {result.stderr.decode('utf-8', errors='ignore')}"
-
         return result.stdout.decode("utf-8", errors="ignore")
 
+    except subprocess.TimeoutExpired:
+        return "[ERROR] Ollama timeout"
     except Exception as e:
         return f"[ERROR] Ollama execution failed: {str(e)}"
 
@@ -144,114 +137,161 @@ async def handle_rpc(body: dict):
     params = body.get("params", {})
 
     # ----------------------------------------
-    # A) analyze_text
+    # (0) initialize  — REQUIRED
     # ----------------------------------------
-    if method == "analyze_text":
-        text = params.get("text", "")
-        mode = params.get("mode", "summary")
-
-        if not text.strip():
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {"code": -32602, "message": "text is required"}
-            }
-
-        if mode == "summary":
-            prompt = f"Summarize the following text:\n\n{text}"
-        elif mode == "analysis":
-            prompt = f"Analyze the following text deeply:\n\n{text}"
-        elif mode == "keywords":
-            prompt = f"Extract important keywords from the following text:\n\n{text}"
-        else:
-            prompt = text
-
-        result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
-
+    if method == "initialize":
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
-                "content": [{"type": "text", "text": result}],
-                "isError": result.startswith("[ERROR]")
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             }
         }
 
     # ----------------------------------------
-    # B) call_ollama
+    # (1) tools/list  — REQUIRED
     # ----------------------------------------
-    if method == "call_ollama":
-        model = params.get("model")
-        prompt = params.get("prompt")
-
-        if not model or not prompt:
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {
-                    "code": -32602,
-                    "message": "model and prompt required"
-                }
-            }
-
-        result = call_ollama_raw(model, prompt)
-
+    if method == "tools/list":
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
-                "content": [{"type": "text", "text": result}],
-                "isError": result.startswith("[ERROR]")
+                "tools": [
+                    {
+                        "name": "analyze_text",
+                        "description": "Analyze/summarize text using Ollama.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["summary", "analysis", "keywords"],
+                                    "default": "summary",
+                                },
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                    {
+                        "name": "call_ollama",
+                        "description": "Call any Ollama model with a prompt.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "model": {"type": "string"},
+                                "prompt": {"type": "string"},
+                            },
+                            "required": ["model", "prompt"],
+                        },
+                    },
+                    {
+                        "name": "summarize_file",
+                        "description": "Read file & summarize via Ollama.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ]
             }
         }
 
     # ----------------------------------------
-    # C) summarize_file
+    # (2) tools/call — REQUIRED
     # ----------------------------------------
-    if method == "summarize_file":
-        path = params.get("path")
+    if method == "tools/call":
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
 
-        if not path or not os.path.exists(path):
+        # A) analyze_text
+        if tool_name == "analyze_text":
+            text = arguments.get("text", "")
+            mode = arguments.get("mode", "summary")
+
+            if not text.strip():
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32602, "message": "text required"}}
+
+            if mode == "summary":
+                prompt = f"Summarize:\n{text}"
+            elif mode == "analysis":
+                prompt = f"Analyze:\n{text}"
+            elif mode == "keywords":
+                prompt = f"Keywords:\n{text}"
+            else:
+                prompt = text
+
+            result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
+            if result.startswith("[ERROR]"):
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32603, "message": result}}
+
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
-                "error": {"code": -32602, "message": "File not found"}
+                "result": {"content": [{"type": "text", "text": result}]}
             }
 
-        try:
+        # B) call_ollama
+        if tool_name == "call_ollama":
+            model = arguments.get("model")
+            prompt = arguments.get("prompt")
+
+            if not model or not prompt:
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32602, "message": "model & prompt required"}}
+
+            result = call_ollama_raw(model, prompt)
+            if result.startswith("[ERROR]"):
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32603, "message": result}}
+
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "result": {"content": [{"type": "text", "text": result}]}
+            }
+
+        # C) summarize_file
+        if tool_name == "summarize_file":
+            path = arguments.get("path")
+
+            if not path or not os.path.exists(path):
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32602, "message": "file not found"}}
+
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
-        except:
+
+            prompt = f"Summarize:\n{content}"
+            result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
+
+            if result.startswith("[ERROR]"):
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "error": {"code": -32603, "message": result}}
+
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
-                "error": {"code": -32603, "message": "File read error"}
+                "result": {"content": [{"type": "text", "text": result}]}
             }
 
-        prompt = f"Summarize this file content:\n\n{content}"
-        result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
-
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": {
-                "content": [{"type": "text", "text": result}],
-                "isError": result.startswith("[ERROR]")
-            }
-        }
+        return {"jsonrpc": "2.0", "id": rpc_id,
+                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}}
 
     # ----------------------------------------
-    # D) Unknown Method
+    # Unknown method
     # ----------------------------------------
-    return {
-        "jsonrpc": "2.0",
-        "id": rpc_id,
-        "error": {"code": -32601, "message": f"Unknown method: {method}"}
-    }
+    return {"jsonrpc": "2.0", "id": rpc_id,
+            "error": {"code": -32601, "message": f"Unknown method: {method}"}}
 
 
 # ============================================
-# 3) STREAMABLE HTTP /mcp
+# 3) STREAMABLE HTTP
 # ============================================
 @app.post("/mcp")
 async def rpc_http(request: Request):
@@ -261,7 +301,7 @@ async def rpc_http(request: Request):
         return JSONResponse({
             "jsonrpc": "2.0",
             "id": None,
-            "error": {"code": -32700, "message": "Parse error"}
+            "error": {"code": -32700, "message": "Parse error"},
         })
 
     result = await handle_rpc(body)
@@ -271,21 +311,22 @@ async def rpc_http(request: Request):
 
 
 # ============================================
-# 4) SSE (FIXED VERSION — instant flush)
+# 4) SSE (correct format)
 # ============================================
 async def sse_stream():
-    # 첫 이벤트 즉시 전송
-    yield "event: connected\ndata: {}\n\n"
-
-    # heartbeat
+    yield f"data: {json.dumps({'event': 'connected'})}\n\n"
     while True:
-        yield "event: alive\ndata: {}\n\n"
+        yield f"data: {json.dumps({'event': 'alive'})}\n\n"
         await asyncio.sleep(5)
-
 
 @app.get("/sse")
 async def sse_endpoint():
     return StreamingResponse(
         sse_stream(),
-        media_type="text/event-stream"
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive",
+            "Pragma": "no-cache",
+        }
     )
