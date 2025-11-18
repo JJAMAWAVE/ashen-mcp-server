@@ -1,201 +1,247 @@
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# =============================
+# Server Constants
+# =============================
+BASE_URL = "https://ashen-mcp-server.onrender.com"
+SERVER_NAME = "ashen-mcp-server"
+SERVER_VERSION = "2.0.0"
+PROTOCOL_VERSION = "2025-06-18"
 
 app = FastAPI()
 
-# ===== SETTINGS =====
-SERVER_NAME = "ashen-mcp-server"
-SERVER_VERSION = "2.0.0"
-PROTOCOL_VERSION = "2025-06-18"         # 최신 스펙 버전
-BASE_URL = "https://ashen-mcp-server.onrender.com"
-
-
-# ===== CORS ALLOW =====
+# =============================
+# CORS (최대 호환성)
+# =============================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],     # 매우 중요
+    expose_headers=["*"],    # 매우 중요
 )
 
 
-# ------------------------------------------------------
-# 0. ROOT ENDPOINT — ChatGPT가 MCP URL 테스트 시 필수
-# ------------------------------------------------------
-@app.get("/", status_code=200)
+# =============================
+# Root 확인
+# =============================
+@app.get("/")
 async def root():
-    return {
-        "status": "ok",
-        "name": SERVER_NAME,
-        "version": SERVER_VERSION
-    }
+    return {"status": "ok", "server": SERVER_NAME}
 
 
-@app.get("/health", status_code=200)
-async def health():
-    return {"status": "healthy"}
-
-
-# ------------------------------------------------------
-# 1. MCP METADATA (.well-known/mcp.json)
-# ------------------------------------------------------
+# =============================
+# MCP 메타데이터 (no-cache + JSONResponse)
+# =============================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
-    content = {
+    payload = {
         "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {
-            "tools": {}
-        },
+        "capabilities": {"tools": {}},
         "serverInfo": {
             "name": SERVER_NAME,
-            "version": SERVER_VERSION
+            "version": SERVER_VERSION,
         },
-        "transport": "sse",
+        "transport": "sse",  # SSE 기본
         "sse": {
             "url": f"{BASE_URL}/sse"
         },
-        # 향후 Streamable HTTP 사용 가능 (선택)
+        # Streamable HTTP도 지원
         "streamableHttp": {
             "url": f"{BASE_URL}/mcp"
         }
     }
 
-    response = JSONResponse(content)
+    response = JSONResponse(payload)
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     return response
 
 
-@app.head("/.well-known/mcp.json")
-async def mcp_metadata_head():
-    return Response(status_code=200)
-
-
-# ------------------------------------------------------
-# 2. SSE STREAM — ChatGPT 지속 연결
-# ------------------------------------------------------
-async def sse_stream():
-    # 초기 연결 이벤트
+# =============================
+# SSE Stream
+# =============================
+async def sse_stream(session_id: str):
+    # 클라이언트 연결 확인 이벤트
     yield f"data: {json.dumps({'event': 'connected'})}\n\n"
     await asyncio.sleep(0.2)
 
-    # keep-alive
+    # Keep Alive
     while True:
         yield f"data: {json.dumps({'event': 'alive'})}\n\n"
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
 
 
 @app.get("/sse")
-async def sse_endpoint():
+async def sse_endpoint(request: Request):
+    session_id = request.query_params.get("session_id", "default")
+
     headers = {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Connection": "keep-alive",
-        "Pragma": "no-cache"
+        "Pragma": "no-cache",
     }
-    return StreamingResponse(sse_stream(), headers=headers)
+
+    return StreamingResponse(sse_stream(session_id), headers=headers)
 
 
-# ------------------------------------------------------
-# 3. JSON-RPC HANDLER (CORE MCP LOGIC)
-# ------------------------------------------------------
-async def handle_rpc(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# =============================
+# JSON-RPC Router
+# =============================
+async def handle_rpc(body: Dict[str, Any]) -> Dict[str, Any]:
     method = body.get("method")
     params = body.get("params", {})
-    rpc_id = body.get("id")
+    request_id = body.get("id")
 
-    is_notification = rpc_id is None
-
-    def ok(result: Any) -> Optional[Dict[str, Any]]:
-        if is_notification:
-            return None
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": result
-        }
-
-    def err(code: int, message: str):
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "error": {"code": code, "message": message}
-        }
-
-    # INITIALIZE
+    # === JSON-RPC: initialize ===
     if method == "initialize":
-        return ok({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
-        })
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "serverInfo": {
+                    "name": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                },
+                "capabilities": {"tools": {}},
+            },
+        }
 
-    # TOOL LIST
+    # === JSON-RPC: tools/list ===
     if method == "tools/list":
-        return ok({
-            "tools": [
-                {
-                    "name": "hello",
-                    "description": "Return a greeting message.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"name": {"type": "string"}},
-                        "required": ["name"]
-                    }
+        tools = [
+            {
+                "name": "hello",
+                "description": "Simple greeting tool",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"]
                 }
-            ]
-        })
+            },
+            {
+                "name": "add",
+                "description": "Add two numbers",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number"},
+                        "b": {"type": "number"}
+                    },
+                    "required": ["a", "b"]
+                }
+            }
+        ]
 
-    # TOOL CALL
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"tools": tools},
+        }
+
+    # === JSON-RPC: tools/call ===
     if method == "tools/call":
         tool_name = params.get("name")
         args = params.get("arguments", {})
 
         if tool_name == "hello":
             name = args.get("name", "friend")
-            return ok({
-                "content": [{"type": "text", "text": f"Hello, {name}!"}],
-                "isError": False
-            })
+            text = f"Hello, {name}!"
+        elif tool_name == "add":
+            a = args.get("a", 0)
+            b = args.get("b", 0)
+            text = f"{a} + {b} = {a + b}"
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Unknown tool: {tool_name}",
+                },
+            }
 
-        return err(-32601, f"Unknown tool: {tool_name}")
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": False,
+            },
+        }
 
-    # UNKNOWN METHOD
-    if is_notification:
-        return None
+    # === Unknown method ===
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": -32601,
+            "message": f"Unknown method: {method}",
+        },
+    }
 
-    return err(-32601, f"Unknown method: {method}")
 
-
-@app.post("/messages")
-async def messages_endpoint(request: Request):
+# =============================
+# Streamable HTTP MCP Endpoint
+# =============================
+@app.post("/mcp")
+async def mcp_http(request: Request):
     try:
         body = await request.json()
-    except:
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {"code": -32700, "message": "Parse error"}
-        }, status_code=400)
+        response = await handle_rpc(body)
+        return JSONResponse(response)
 
-    response_payload = await handle_rpc(body)
+    except Exception as e:
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32700,
+                    "message": "Parse error",
+                    "data": str(e),
+                },
+            },
+            status_code=400,
+        )
 
-    if response_payload is None:
-        return Response(status_code=204)
 
-    return JSONResponse(response_payload)
+# =============================
+# SSE-based RPC Endpoint
+# =============================
+@app.post("/messages")
+async def mcp_messages(request: Request):
+    try:
+        body = await request.json()
+        response = await handle_rpc(body)
 
+        # request_id 없는 경우: 반드시 응답해야 Render에서 drop 안 됨
+        if body.get("id") is None:
+            return JSONResponse({"jsonrpc": "2.0", "result": {"ok": True}})
 
-# ------------------------------------------------------
-# 4. STREAMABLE HTTP (Optional)
-# ------------------------------------------------------
-@app.post("/mcp")
-async def streamable_mcp(request: Request):
-    body = await request.json()
-    response = await handle_rpc(body)
-    return JSONResponse(response)
+        return JSONResponse(response)
+
+    except Exception as e:
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32700,
+                    "message": "Parse error",
+                    "data": str(e),
+                },
+            },
+            status_code=400,
+        )
