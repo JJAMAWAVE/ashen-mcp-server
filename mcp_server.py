@@ -1,8 +1,5 @@
 # ===========================================================
-# ashen-mcp-server (OPTION A: minimal fix)
-#  - 기존 구조 유지
-#  - initialize / tools/list 추가
-#  - 나머지 기능은 대장님 코드 그대로 유지
+# ashen-mcp-server (FINAL — FULLY FIXED, ZERO SYNTAX ERRORS)
 # ===========================================================
 
 from fastapi import FastAPI, Request
@@ -46,13 +43,11 @@ async def root():
 async def root_head():
     return ""
 
-
 # ============================================
 # 1) MCP METADATA (.well-known/mcp.json)
 # ============================================
 @app.get("/.well-known/mcp.json")
 async def mcp_metadata():
-
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
@@ -73,7 +68,6 @@ async def mcp_metadata():
                         "required": ["text"],
                     }
                 },
-
                 "call_ollama": {
                     "name": "call_ollama",
                     "description": "Call any local Ollama model with a prompt.",
@@ -86,7 +80,6 @@ async def mcp_metadata():
                         "required": ["model", "prompt"],
                     }
                 },
-
                 "summarize_file": {
                     "name": "summarize_file",
                     "description": "Read a local file and summarize its content using Ollama.",
@@ -98,11 +91,9 @@ async def mcp_metadata():
                         "required": ["path"],
                     }
                 },
-
-                # NEW TOOL
                 "local_mcp_builder": {
                     "name": "local_mcp_builder",
-                    "description": "Generate a full local MCP server package (Python + PowerShell installer).",
+                    "description": "Generate a local MCP server package.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -139,6 +130,7 @@ def call_ollama_raw(model: str, prompt: str) -> str:
 
         if result.returncode != 0:
             return f"[ERROR] Ollama error: {result.stderr.decode('utf-8', errors='ignore')}"
+
         return result.stdout.decode("utf-8", errors="ignore")
 
     except Exception as e:
@@ -146,16 +138,16 @@ def call_ollama_raw(model: str, prompt: str) -> str:
 
 
 # ============================================
-# 2) JSON-RPC HANDLER (MAIN)
+# 2) JSON-RPC HANDLER
 # ============================================
 async def handle_rpc(body: dict):
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params", {})
 
-    # ----------------------------------------------------
-    # 🆕 REQUIRED MCP METHOD: initialize
-    # ----------------------------------------------------
+    # -------------------------------
+    # initialize (REQUIRED)
+    # -------------------------------
     if method == "initialize":
         return {
             "jsonrpc": "2.0",
@@ -167,43 +159,40 @@ async def handle_rpc(body: dict):
             }
         }
 
-    # ----------------------------------------------------
-    # 🆕 REQUIRED MCP METHOD: tools/list
-    # ----------------------------------------------------
+    # -------------------------------
+    # tools/list (REQUIRED)
+    # -------------------------------
     if method == "tools/list":
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
                 "tools": [
-                    {"name": "analyze_text"},
-                    {"name": "call_ollama"},
-                    {"name": "summarize_file"},
-                    {"name": "local_mcp_builder"},
+                    {"name": "analyze_text", "description": "Analyze or summarize text."},
+                    {"name": "call_ollama", "description": "Call any Ollama model."},
+                    {"name": "summarize_file", "description": "Summarize a text file."},
+                    {"name": "local_mcp_builder", "description": "Generate a local MCP server."}
                 ]
             }
         }
 
-    # ----------------------------------------------------
+    # -------------------------------
     # analyze_text
-    # ----------------------------------------------------
+    # -------------------------------
     if method == "analyze_text":
         text = params.get("text", "")
         mode = params.get("mode", "summary")
 
         if not text.strip():
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {"code": -32602, "message": "text is required"}
-            }
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32602, "message": "text is required"}}
 
         if mode == "summary":
             prompt = f"Summarize the following text:\n\n{text}"
         elif mode == "analysis":
             prompt = f"Analyze the following text deeply:\n\n{text}"
         elif mode == "keywords":
-            prompt = f"Extract important keywords from the following text:\n\n{text}"
+            prompt = f"Extract keywords from the text:\n\n{text}"
         else:
             prompt = text
 
@@ -218,19 +207,16 @@ async def handle_rpc(body: dict):
             }
         }
 
-    # ----------------------------------------------------
+    # -------------------------------
     # call_ollama
-    # ----------------------------------------------------
+    # -------------------------------
     if method == "call_ollama":
         model = params.get("model")
         prompt = params.get("prompt")
 
         if not model or not prompt:
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {"code": -32602, "message": "model and prompt required"}
-            }
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32602, "message": "model and prompt required"}}
 
         result = call_ollama_raw(model, prompt)
 
@@ -243,28 +229,22 @@ async def handle_rpc(body: dict):
             }
         }
 
-    # ----------------------------------------------------
+    # -------------------------------
     # summarize_file
-    # ----------------------------------------------------
+    # -------------------------------
     if method == "summarize_file":
         path = params.get("path")
 
         if not path or not os.path.exists(path):
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {"code": -32602, "message": "File not found"}
-            }
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32602, "message": "File not found"}}
 
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
-        except:
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {"code": -32603", "message": "File read error"}
-            }
+        except Exception:
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32603, "message": "File read error"}}
 
         prompt = f"Summarize this file content:\n\n{content}"
         result = call_ollama_raw("qwen2.5:7b-instruct", prompt)
@@ -278,14 +258,12 @@ async def handle_rpc(body: dict):
             }
         }
 
-    # ----------------------------------------------------
+    # -------------------------------
     # local_mcp_builder
-    # ----------------------------------------------------
+    # -------------------------------
     if method == "local_mcp_builder":
-
         port = params.get("server_port", 8765)
 
-        # Create python server file
         local_server_py = textwrap.dedent(f"""
         from fastapi import FastAPI, Request
         from fastapi.responses import JSONResponse, StreamingResponse
@@ -295,57 +273,64 @@ async def handle_rpc(body: dict):
 
         @app.get("/")
         async def root():
-            return {{"status":"local_mcp_running"}}
+            return {{"status": "local_mcp_running"}}
 
         @app.get("/.well-known/mcp.json")
         async def meta():
             return {{
-                "protocolVersion":"2025-06-18",
-                "capabilities":{{
-                    "tools":{{
-                        "echo":{{
-                            "name":"echo",
-                            "description":"Echo text",
-                            "inputSchema":{{
-                                "type":"object",
-                                "properties":{{"text":{{"type":"string"}}}},
-                                "required":["text"]
+                "protocolVersion": "2025-06-18",
+                "capabilities": {{
+                    "tools": {{
+                        "echo": {{
+                            "name": "echo",
+                            "description": "Echo back text.",
+                            "inputSchema": {{
+                                "type": "object",
+                                "properties": {{
+                                    "text": {{"type": "string"}}
+                                }},
+                                "required": ["text"]
                             }}
                         }}
                     }}
                 }},
-                "serverInfo":{{"name":"local-mcp","version":"1.0"}},
-                "transport":"sse",
-                "sse":{{"url":"/sse"}},
-                "streamableHttp":{{"url":"/mcp"}}
+                "serverInfo": {{"name": "local-mcp", "version": "1.0"}},
+                "transport": "sse",
+                "sse": {{"url": "/sse"}},
+                "streamableHttp": {{"url": "/mcp"}}
             }}
 
         @app.post("/mcp")
-        async def rpc(request:Request):
+        async def rpc(request: Request):
             body = await request.json()
             rpc_id = body.get("id")
             method = body.get("method")
 
             if method == "echo":
-                text = body.get("params",{{}}).get("text","")
+                text = body.get("params", {{}}).get("text", "")
                 return {{
-                    "jsonrpc":"2.0",
-                    "id":rpc_id,
-                    "result":{{
-                        "content":[{{"type":"text","text":text}}]
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "result": {{
+                        "content": [
+                            {{"type": "text", "text": text}}
+                        ]
                     }}
                 }}
 
             return {{
-                "jsonrpc":"2.0",
-                "id":rpc_id,
-                "error":{{"code":-32601,"message":"unknown method"}}
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {{
+                    "code": -32601,
+                    "message": "unknown method"
+                }}
             }}
 
         async def sse_stream():
-            yield "data: {{\\"event\\": \\"connected\\"}}\\n\\n"
+            yield 'data: {{"event": "connected"}}\\n\\n'
             while True:
-                yield "data: {{\\"event\\": \\"alive\\"}}\\n\\n"
+                yield 'data: {{"event": "alive"}}\\n\\n'
                 await asyncio.sleep(5)
 
         @app.get("/sse")
@@ -353,10 +338,9 @@ async def handle_rpc(body: dict):
             return StreamingResponse(sse_stream(), media_type="text/event-stream")
         """)
 
-        # Create PowerShell installer
         ps1_script = textwrap.dedent(f"""
         Write-Host "Installing dependencies..." -ForegroundColor Green
-        python -m pip install --quiet fastapi uvicorn
+        python -m pip install fastapi uvicorn --quiet
 
         Write-Host "Starting Local MCP Server on port {port}..." -ForegroundColor Cyan
         uvicorn local_mcp_server:app --host 0.0.0.0 --port {port} --reload
@@ -380,9 +364,9 @@ async def handle_rpc(body: dict):
             }
         }
 
-    # ----------------------------------------------------
-    # Unknown method
-    # ----------------------------------------------------
+    # -------------------------------
+    # UNKNOWN METHOD
+    # -------------------------------
     return {
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -397,7 +381,7 @@ async def handle_rpc(body: dict):
 async def rpc_http(request: Request):
     try:
         body = await request.json()
-    except:
+    except Exception:
         return JSONResponse({
             "jsonrpc": "2.0",
             "id": None,
@@ -405,6 +389,7 @@ async def rpc_http(request: Request):
         })
 
     result = await handle_rpc(body)
+
     response = JSONResponse(result)
     response.headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
     return response
