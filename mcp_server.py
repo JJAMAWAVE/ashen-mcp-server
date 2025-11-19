@@ -9,6 +9,7 @@
 # 4. Accept header validation
 # 5. Proper session lifecycle
 # 6. DELETE method support
+# 7. Complete request/response logging
 # ===========================================================
 
 from fastapi import FastAPI, Request, Response, Header, HTTPException
@@ -22,11 +23,22 @@ import os
 import base64
 import textwrap
 import uuid
+import logging
+
+# ============== LOGGING SETUP ==============
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler("mcp_server_requests.log"),
+        logging.StreamHandler()
+    ]
+)
 
 # ============== CONFIG ==============
 SERVER_NAME = "ashen-mcp-server"
-SERVER_VERSION = "3.1.0"
-PROTOCOL_VERSION = "2025-03-26"  # ← Updated to match spec
+SERVER_VERSION = "3.2.0"
+PROTOCOL_VERSION = "2025-03-26"
 MCP_SESSION_ID_HEADER = "mcp-session-id"
 
 # ============== SESSION STORAGE ==============
@@ -119,8 +131,9 @@ def validate_mcp_request(request: Request, require_session: bool = False) -> Opt
 
 # ============== ROOT ENDPOINT ==============
 @app.get("/")
-async def root():
+async def root(request: Request):
     """Health check endpoint"""
+    log_request(request)
     response = JSONResponse({
         "status": "ok",
         "server": SERVER_NAME,
@@ -129,7 +142,9 @@ async def root():
         "mcp_endpoint": "/mcp",
         "metadata": "/.well-known/mcp.json"
     })
-    return add_cors_headers(response)
+    response = add_cors_headers(response)
+    log_response(response, "Health check")
+    return response
 
 
 @app.head("/")
@@ -141,8 +156,9 @@ async def head_root():
 
 # ============== MCP METADATA ==============
 @app.get("/.well-known/mcp.json")
-async def mcp_metadata():
+async def mcp_metadata(request: Request):
     """MCP metadata endpoint (discovery)"""
+    log_request(request)
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
@@ -207,7 +223,9 @@ async def mcp_metadata():
         "streamableHttp": {"url": "/mcp"}
     }
     response = JSONResponse(metadata)
-    return add_cors_headers(response)
+    response = add_cors_headers(response)
+    log_response(response, "Metadata sent")
+    return response
 
 
 # ============== OLLAMA HELPER ==============
@@ -234,6 +252,8 @@ async def handle_rpc_request(body: dict) -> dict:
     rpc_id = body.get("id")
     method = body.get("method")
     params = body.get("params", {})
+
+    logging.info(f"🔧 RPC Call: method={method}, id={rpc_id}")
 
     # -------------------------------------------------------
     # REQUIRED: initialize
@@ -462,7 +482,6 @@ async def mcp_options():
 
 @app.post("/mcp")
 async def rpc(request: Request):
-    # Validate headers
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("application/json"):
         raise HTTPException(status_code=415, detail="Content-Type must be application/json")
@@ -472,12 +491,10 @@ async def rpc(request: Request):
     method = body.get("method")
     session_id = request.headers.get(MCP_SESSION_ID_HEADER)
 
-    # Create session if needed
     if not session_id:
         session_id = str(uuid.uuid4())
         active_sessions[session_id] = {"status": "active"}
     
-    # initialize
     if method == "initialize":
         result = {
             "jsonrpc": "2.0",
@@ -492,7 +509,6 @@ async def rpc(request: Request):
         response.headers[MCP_SESSION_ID_HEADER] = session_id
         return add_cors_headers(response)
 
-    # tools/list
     if method == "tools/list":
         result = {
             "jsonrpc": "2.0",
@@ -513,7 +529,6 @@ async def rpc(request: Request):
         response.headers[MCP_SESSION_ID_HEADER] = session_id
         return add_cors_headers(response)
 
-    # echo tool
     if method == "echo":
         msg = body.get("params", {}).get("text", "")
         result = {
@@ -525,7 +540,6 @@ async def rpc(request: Request):
         response.headers[MCP_SESSION_ID_HEADER] = session_id
         return add_cors_headers(response)
 
-    # Unknown method
     result = {
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -593,253 +607,3 @@ uvicorn local_mcp_server:app --host 127.0.0.1 --port {port} --reload
 ## Quick Start
 
 ### 1. Install Dependencies
-```powershell
-python -m pip install fastapi uvicorn
-```
-
-### 2. Run Server
-```powershell
-.\\run_local_mcp.ps1
-```
-
-Server will start on http://localhost:{port}
-
-## ChatGPT Desktop Integration
-
-1. Open ChatGPT
-2. Go to Settings → Connectors → Advanced → Developer Mode
-3. Add new connector:
-   - Name: Local MCP
-   - URL: `http://localhost:{port}/mcp`
-4. Click Add
-
-## Testing
-
-Test endpoints:
-- Root: http://localhost:{port}/
-- Metadata: http://localhost:{port}/.well-known/mcp.json
-- Try the echo tool once connected in ChatGPT
-
-## Troubleshooting
-
-**Port already in use:**
-```powershell
-netstat -ano | findstr :{port}
-```
-
-**Server won't start:**
-- Make sure Python 3.8+ is installed
-- Check firewall settings
-- Try running PowerShell as Administrator
-
-**ChatGPT won't connect:**
-- Verify server is running
-- Check URL is exactly: http://localhost:{port}/mcp
-- Try refreshing ChatGPT
-
-## Architecture
-
-```
-ChatGPT Desktop
-    ↓ (StreamableHTTP)
-Local MCP Server (http://localhost:{port}/mcp)
-    ↓ (JSON-RPC 2.0)
-echo tool
-```
-"""
-
-        package = {
-            "local_mcp_server.py": local_server_py,
-            "run_local_mcp.ps1": ps1_script,
-            "README.md": readme_text
-        }
-
-        encoded = base64.b64encode(json.dumps(package).encode()).decode()
-
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"✅ **Local MCP package created successfully!**\n\n**Files generated:**\n- `local_mcp_server.py` - Complete FastAPI server\n- `run_local_mcp.ps1` - PowerShell installer\n- `README.md` - Setup guide\n\n**Next steps:**\n1. Extract the package\n2. Run `run_local_mcp.ps1`\n3. Add to ChatGPT: http://localhost:{port}/mcp"
-                    },
-                    {
-                        "type": "resource",
-                        "resource": {
-                            "uri": f"data:application/json;base64,{encoded}",
-                            "mimeType": "application/json"
-                        }
-                    }
-                ]
-            }
-        }
-
-    # -------------------------------------------------------
-    # Unknown method
-    # -------------------------------------------------------
-    return {
-        "jsonrpc": "2.0",
-        "id": rpc_id,
-        "error": {"code": -32601, "message": f"Unknown method: {method}"}
-    }
-
-
-# ============== MCP ENDPOINT (StreamableHTTP) ==============
-@app.options("/mcp")
-async def mcp_options():
-    """CORS preflight for /mcp"""
-    response = Response()
-    return add_cors_headers(response)
-
-
-@app.post("/mcp")
-async def mcp_post_handler(request: Request):
-    """
-    Main MCP endpoint (POST) - StreamableHTTP protocol.
-    Handles: initialize, tools/list, tool calls
-    """
-    try:
-        # Validate request
-        session_id = validate_mcp_request(request, require_session=False)
-        
-        # Parse body
-        body = await request.json()
-        
-        # Create session if needed
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            active_sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
-        
-        # Handle RPC
-        result = await handle_rpc_request(body)
-        
-        # Return response
-        response = JSONResponse(result)
-        response.headers[MCP_SESSION_ID_HEADER] = session_id
-        response.headers["Content-Type"] = "application/json"
-        response = add_cors_headers(response)
-        log_response(response, f"RPC method: {body.get('method')}, session: {session_id}")
-        return response
-        
-    except HTTPException as e:
-        logging.error(f"❌ HTTP Exception: {e.status_code} - {e.detail}")
-        response = JSONResponse(
-            {"error": e.detail},
-            status_code=e.status_code
-        )
-        response = add_cors_headers(response)
-        log_response(response, f"Error: {e.detail}")
-        return response
-    except json.JSONDecodeError as e:
-        logging.error(f"❌ JSON Parse Error: {str(e)}")
-        response = JSONResponse(
-            {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error"}
-            },
-            status_code=400
-        )
-        response = add_cors_headers(response)
-        log_response(response, "JSON parse error")
-        return response
-    except Exception as e:
-        logging.error(f"❌ Internal Error: {str(e)}")
-        response = JSONResponse(
-            {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32603, "message": f"Internal error: {str(e)}"}
-            },
-            status_code=500
-        )
-        response = add_cors_headers(response)
-        log_response(response, f"Internal error: {str(e)}")
-        return response
-
-
-@app.get("/mcp")
-async def mcp_get_handler(request: Request):
-    """
-    MCP SSE endpoint (GET) - passive stream.
-    """
-    try:
-        # Validate SSE request
-        session_id = validate_mcp_request(request, require_session=True)
-        
-        # Create SSE stream
-        async def sse_stream():
-            yield 'data: {"event":"connected"}\n\n'
-            while True:
-                yield 'data: {"event":"alive"}\n\n'
-                await asyncio.sleep(5)
-        
-        response = StreamingResponse(
-            sse_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
-        response.headers[MCP_SESSION_ID_HEADER] = session_id
-        return add_cors_headers(response)
-        
-    except HTTPException as e:
-        response = JSONResponse(
-            {"error": e.detail},
-            status_code=e.status_code
-        )
-        return add_cors_headers(response)
-
-
-@app.delete("/mcp")
-async def mcp_delete_handler(request: Request):
-    """
-    MCP session termination (DELETE).
-    """
-    try:
-        session_id = validate_mcp_request(request, require_session=True)
-        
-        # Delete session
-        if session_id in active_sessions:
-            del active_sessions[session_id]
-        
-        response = Response(status_code=200)
-        return add_cors_headers(response)
-        
-    except HTTPException as e:
-        response = JSONResponse(
-            {"error": e.detail},
-            status_code=e.status_code
-        )
-        return add_cors_headers(response)
-
-
-# ============== DEBUG ENDPOINT ==============
-@app.get("/debug")
-async def debug_info():
-    """Debug information"""
-    response = JSONResponse({
-        "server": SERVER_NAME,
-        "version": SERVER_VERSION,
-        "protocol": PROTOCOL_VERSION,
-        "active_sessions": len(active_sessions),
-        "sessions": list(active_sessions.keys())
-    })
-    return add_cors_headers(response)
-
-
-# ============== MAIN ==============
-if __name__ == "__main__":
-    import uvicorn
-    # Bind to 0.0.0.0 for Render.com, 127.0.0.1 for local
-    uvicorn.run(
-        app,
-        host="0.0.0.0",  # Required for Render.com
-        port=int(os.environ.get("PORT", 10000)),  # Render assigns port
-        log_level="info"
-    )
