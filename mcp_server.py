@@ -1,5 +1,5 @@
 # ===========================================================
-# ashen-mcp-server (FULL & FIXED VERSION — 100% WORKING)
+# ashen-mcp-server (FULL FIXED — 100% WORKING)
 # ===========================================================
 
 from fastapi import FastAPI, Request
@@ -11,18 +11,19 @@ import json, asyncio, subprocess, os, base64, textwrap
 # CONFIG
 # --------------------------------------------
 SERVER_NAME = "ashen-mcp-server"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.0.1"
 PROTOCOL_VERSION = "2025-06-18"
 
 app = FastAPI()
 
-# CORS
+# CORS (더 명시적으로)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # ===========================================================
@@ -30,7 +31,7 @@ app.add_middleware(
 # ===========================================================
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION}
 
 @app.head("/")
 async def head_root():
@@ -42,7 +43,6 @@ async def head_root():
 # ===========================================================
 @app.get("/.well-known/mcp.json")
 async def mcp_wellknown():
-
     metadata = {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
@@ -61,7 +61,6 @@ async def mcp_wellknown():
         "sse": {"url": "/sse"},
         "streamableHttp": {"url": "/mcp"}
     }
-
     return JSONResponse(metadata)
 
 
@@ -212,18 +211,28 @@ async def handle_rpc(body):
         }
 
     # -------------------------------------------------------
-    # local_mcp_builder (Full fixed version)
+    # local_mcp_builder
     # -------------------------------------------------------
     if method == "local_mcp_builder":
-
         port = params.get("server_port", 8765)
 
         local_server_py = textwrap.dedent(f"""
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio, json
 
 app = FastAPI()
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
 
 @app.get("/")
 async def root():
@@ -254,6 +263,10 @@ async def meta():
         "streamableHttp":{{"url":"/mcp"}}
     }}
 
+@app.options("/mcp")
+async def mcp_options():
+    return JSONResponse(content={{}})
+
 @app.post("/mcp")
 async def rpc(request: Request):
     body = await request.json()
@@ -275,7 +288,7 @@ async def rpc(request: Request):
         return {{
             "jsonrpc":"2.0",
             "id":rpc_id,
-            "result":{{"tools":[{{"name":"echo"}}]]}}
+            "result":{{"tools":[{{"name":"echo"}}]}}
         }}
 
     if method == "echo":
@@ -283,7 +296,7 @@ async def rpc(request: Request):
         return {{
             "jsonrpc":"2.0",
             "id":rpc_id,
-            "result":{{"content":[{{"type":"text","text":msg}}]]}}
+            "result":{{"content":[{{"type":"text","text":msg}}]}}
         }}
 
     return {{
@@ -291,6 +304,10 @@ async def rpc(request: Request):
         "id":rpc_id,
         "error":{{"code":-32601,"message":"unknown method"}}
     }}
+
+@app.options("/sse")
+async def sse_options():
+    return JSONResponse(content={{}})
 
 async def sse_stream():
     yield 'data: {{"event":"connected"}}\\n\\n'
@@ -300,7 +317,15 @@ async def sse_stream():
 
 @app.get("/sse")
 async def sse_ep():
-    return StreamingResponse(sse_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_stream(),
+        media_type="text/event-stream",
+        headers={{
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }}
+    )
         """)
 
         ps1_script = textwrap.dedent(f"""
@@ -316,16 +341,16 @@ uvicorn local_mcp_server:app --host 0.0.0.0 --port {port} --reload
         """)
 
         readme_text = textwrap.dedent("""
-        # Local MCP Server
+# Local MCP Server
 
-        ## HOW TO INSTALL
-        1. Extract all files
-        2. Open PowerShell as Administrator
-        3. Run: .\\run_local_mcp.ps1
+## HOW TO INSTALL
+1. Extract all files
+2. Open PowerShell as Administrator
+3. Run: .\\run_local_mcp.ps1
 
-        ## TEST
-        http://localhost:8765
-        http://localhost:8765/.well-known/mcp.json
+## TEST
+http://localhost:8765
+http://localhost:8765/.well-known/mcp.json
         """)
 
         package = {
@@ -341,12 +366,14 @@ uvicorn local_mcp_server:app --host 0.0.0.0 --port {port} --reload
             "id": rpc_id,
             "result": {
                 "content": [
-                    {"type": "text", "text": "Local MCP package generated successfully."},
-                    {"type": "file", "name": "local_mcp_package.json", "data": encoded}
+                    {"type": "text", "text": "✅ Local MCP package generated successfully!"},
+                    {"type": "resource", "resource": {
+                        "uri": f"data:application/json;base64,{encoded}",
+                        "mimeType": "application/json"
+                    }}
                 ]
             }
         }
-
 
     # -------------------------------------------------------
     # Unknown method
@@ -359,8 +386,20 @@ uvicorn local_mcp_server:app --host 0.0.0.0 --port {port} --reload
 
 
 # ===========================================================
-# HTTP /mcp
+# HTTP /mcp (POST + OPTIONS for CORS)
 # ===========================================================
+@app.options("/mcp")
+async def mcp_options():
+    """CORS preflight handler"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )
+
 @app.post("/mcp")
 async def rpc_http(request: Request):
     try:
@@ -376,8 +415,20 @@ async def rpc_http(request: Request):
 
 
 # ===========================================================
-# SSE
+# SSE (GET + OPTIONS for CORS)
 # ===========================================================
+@app.options("/sse")
+async def sse_options():
+    """CORS preflight for SSE"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )
+
 async def sse_stream():
     yield 'data: {"event":"connected"}\n\n'
     while True:
@@ -388,5 +439,10 @@ async def sse_stream():
 async def sse_endpoint():
     return StreamingResponse(
         sse_stream(),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )
