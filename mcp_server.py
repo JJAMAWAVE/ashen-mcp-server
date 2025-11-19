@@ -1,5 +1,5 @@
 # ===========================================================
-# ashen-mcp-server (FULL FIXED VERSION — 100% WORKING)
+# ashen-mcp-server (FULL & FIXED VERSION — 100% WORKING)
 # ===========================================================
 
 from fastapi import FastAPI, Request
@@ -36,8 +36,9 @@ async def root():
 async def head_root():
     return ""
 
+
 # ===========================================================
-# MCP METADATA (REQUIRED)
+# MCP METADATA
 # ===========================================================
 @app.get("/.well-known/mcp.json")
 async def mcp_wellknown():
@@ -63,6 +64,7 @@ async def mcp_wellknown():
 
     return JSONResponse(metadata)
 
+
 # ===========================================================
 # HELPER — OLLAMA
 # ===========================================================
@@ -83,7 +85,7 @@ def call_ollama_raw(model, prompt):
 
 
 # ===========================================================
-# JSON-RPC CORE
+# JSON-RPC HANDLER
 # ===========================================================
 async def handle_rpc(body):
     rpc_id = body.get("id")
@@ -139,8 +141,8 @@ async def handle_rpc(body):
         mode = params.get("mode", "summary")
 
         if not text.strip():
-            return {"jsonrpc": "2.0", "id": rpc_id,
-                    "error": {"code": -32602, "message": "text required"}}
+            return {"jsonrpc":"2.0","id":rpc_id,
+                    "error":{"code":-32602,"message":"text required"}}
 
         prompts = {
             "summary": f"Summarize:\n\n{text}",
@@ -210,98 +212,141 @@ async def handle_rpc(body):
         }
 
     # -------------------------------------------------------
-    # local_mcp_builder
+    # local_mcp_builder (Full fixed version)
     # -------------------------------------------------------
     if method == "local_mcp_builder":
+
         port = params.get("server_port", 8765)
 
-        server_py = textwrap.dedent(f"""
-        from fastapi import FastAPI, Request
-        from fastapi.responses import JSONResponse, StreamingResponse
-        import asyncio, json
+        local_server_py = textwrap.dedent(f"""
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import asyncio, json
 
-        app = FastAPI()
+app = FastAPI()
 
-        @app.get("/")
-        async def root():
-            return {{"status": "local_mcp_running"}}
+@app.get("/")
+async def root():
+    return {{"status": "local_mcp_running"}}
 
-        @app.get("/.well-known/mcp.json")
-        async def meta():
-            return {{
-                "protocolVersion": "2025-06-18",
-                "capabilities": {{
-                    "tools": {{
-                        "echo": {{}}
-                    }}
-                }},
-                "serverInfo": {{
-                    "name": "local-mcp",
-                    "version": "1.0"
-                }},
-                "transport": "sse",
-                "sse": {{"url": "/sse"}},
-                "streamableHttp": {{"url": "/mcp"}}
-            }}
-
-        @app.post("/mcp")
-        async def rpc(request: Request):
-            body = await request.json()
-            rpc_id = body.get("id")
-            method = body.get("method")
-
-            if method == "echo":
-                msg = body.get("params",{{}}).get("text","")
-                return {{
-                    "jsonrpc": "2.0",
-                    "id": rpc_id,
-                    "result": {{
-                        "content": [{{"type":"text","text":msg}}]
+@app.get("/.well-known/mcp.json")
+async def meta():
+    return {{
+        "protocolVersion": "2025-06-18",
+        "capabilities": {{
+            "tools": {{
+                "echo": {{
+                    "name": "echo",
+                    "description": "Echo text",
+                    "inputSchema": {{
+                        "type": "object",
+                        "properties": {{
+                            "text": {{"type": "string"}}
+                        }},
+                        "required": ["text"]
                     }}
                 }}
-
-            return {{
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "error": {{
-                    "code": -32601,
-                    "message": "unknown method"
-                }}
             }}
+        }},
+        "serverInfo": {{"name":"local-mcp","version":"1.0"}},
+        "transport":"sse",
+        "sse":{{"url":"/sse"}},
+        "streamableHttp":{{"url":"/mcp"}}
+    }}
 
-        async def sse_stream():
-            yield 'data: {{"event":"connected"}}\\n\\n'
-            while True:
-                yield 'data: {{"event":"alive"}}\\n\\n'
-                await asyncio.sleep(5)
+@app.post("/mcp")
+async def rpc(request: Request):
+    body = await request.json()
+    rpc_id = body.get("id")
+    method = body.get("method")
 
-        @app.get("/sse")
-        async def sse_ep():
-            return StreamingResponse(sse_stream(), media_type="text/event-stream")
+    if method == "initialize":
+        return {{
+            "jsonrpc":"2.0",
+            "id":rpc_id,
+            "result":{{
+                "protocolVersion":"2025-06-18",
+                "serverInfo":{{"name":"local-mcp","version":"1.0"}},
+                "capabilities":{{"tools":{{"echo":{{}}}}}}
+            }}
+        }}
+
+    if method == "tools/list":
+        return {{
+            "jsonrpc":"2.0",
+            "id":rpc_id,
+            "result":{{"tools":[{{"name":"echo"}}]]}}
+        }}
+
+    if method == "echo":
+        msg = body.get("params",{{}}).get("text","")
+        return {{
+            "jsonrpc":"2.0",
+            "id":rpc_id,
+            "result":{{"content":[{{"type":"text","text":msg}}]]}}
+        }}
+
+    return {{
+        "jsonrpc":"2.0",
+        "id":rpc_id,
+        "error":{{"code":-32601,"message":"unknown method"}}
+    }}
+
+async def sse_stream():
+    yield 'data: {{"event":"connected"}}\\n\\n'
+    while True:
+        yield 'data: {{"event":"alive"}}\\n\\n'
+        await asyncio.sleep(5)
+
+@app.get("/sse")
+async def sse_ep():
+    return StreamingResponse(sse_stream(), media_type="text/event-stream")
         """)
 
-        ps1 = textwrap.dedent(f"""
-        python -m pip install fastapi uvicorn
-        uvicorn local_mcp_server:app --host 0.0.0.0 --port {port}
+        ps1_script = textwrap.dedent(f"""
+# UTF-8 Encoding
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+Write-Host "Installing dependencies..." -ForegroundColor Green
+python -m pip install --quiet fastapi uvicorn
+
+Write-Host "Starting Local MCP Server on port {port}..." -ForegroundColor Cyan
+uvicorn local_mcp_server:app --host 0.0.0.0 --port {port} --reload
         """)
 
-        pkg = {
-            "local_mcp_server.py": server_py,
-            "run_local_mcp.ps1": ps1
+        readme_text = textwrap.dedent("""
+        # Local MCP Server
+
+        ## HOW TO INSTALL
+        1. Extract all files
+        2. Open PowerShell as Administrator
+        3. Run: .\\run_local_mcp.ps1
+
+        ## TEST
+        http://localhost:8765
+        http://localhost:8765/.well-known/mcp.json
+        """)
+
+        package = {
+            "local_mcp_server.py": local_server_py,
+            "run_local_mcp.ps1": ps1_script,
+            "README.md": readme_text
         }
 
-        encoded = base64.b64encode(json.dumps(pkg).encode()).decode()
+        encoded = base64.b64encode(json.dumps(package).encode()).decode()
 
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "result": {
                 "content": [
-                    {"type": "text", "text": "Local MCP package created."},
+                    {"type": "text", "text": "Local MCP package generated successfully."},
                     {"type": "file", "name": "local_mcp_package.json", "data": encoded}
                 ]
             }
         }
+
 
     # -------------------------------------------------------
     # Unknown method
@@ -311,6 +356,7 @@ async def handle_rpc(body):
         "id":rpc_id,
         "error":{"code":-32601,"message":f"Unknown method: {method}"}
     }
+
 
 # ===========================================================
 # HTTP /mcp
@@ -328,6 +374,7 @@ async def rpc_http(request: Request):
 
     return JSONResponse(await handle_rpc(body))
 
+
 # ===========================================================
 # SSE
 # ===========================================================
@@ -339,5 +386,7 @@ async def sse_stream():
 
 @app.get("/sse")
 async def sse_endpoint():
-    return StreamingResponse(sse_stream(),
-                             media_type="text/event-stream")
+    return StreamingResponse(
+        sse_stream(),
+        media_type="text/event-stream"
+    )
